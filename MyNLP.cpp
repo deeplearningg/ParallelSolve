@@ -9,6 +9,8 @@
 #include <limits.h>
 #include <unistd.h>
 #include <stdlib.h>
+
+
 using namespace std;
 
 #include "placedb.h"
@@ -49,10 +51,12 @@ const double sgEps = 1e-60;
 //for parallel
 
 pthread_mutex_t lock;
+pthread_cond_t  cond_lock;
 unsigned int job_done;
 bool done_flag;
 bool parallel_flag = true;
 vector< vector< double > > save_x_threads;
+double *Xmerge;
 
 
 
@@ -6713,7 +6717,7 @@ bool   MyNLP::PLSolve_smooth(double wWire, double target_density, int currentLev
         }
  */
 
-    pthread_mutex_init(&lock, nullptr);
+//    pthread_mutex_init(&lock, nullptr);
     job_done = 0;
 #if 0
     test();
@@ -7250,6 +7254,10 @@ bool   MyNLP::ParallelSolve(double wWire, double target_density, int currentLeve
     _weightDensity = 1.0;//1.02
     _weightWire = wWire *  totalPotentialGradient/totalWireGradient;//*param.sg_namdaIncFactor;//* param.sg_namdaIncFactor ;
 
+    double parallelScale = (param.isParallel)?param.loop*(param.Den_thread_size + param.WL_thread_size):1;
+    //_weightDensity *= (parallelScale);
+    //_weightWire *= parallelScale;
+
     if(currentLevel != 1)
         _weightWire = _weightWire*1;
 
@@ -7293,9 +7301,9 @@ bool   MyNLP::ParallelSolve(double wWire, double target_density, int currentLeve
     int    lookAheadLegalCount = 0;
     double totalLegalTime = 0.0;
 
-    bool   startDecreasing = (currentLevel == 1) ? false : true;
+    bool   startDecreasing = false;
 
-    int checkStep = 5;
+    int checkStep = param.checkstep;
 
     int LALnoGoodCount = 0;
     int totalIte = 0;
@@ -7385,6 +7393,7 @@ bool   MyNLP::ParallelSolve(double wWire, double target_density, int currentLeve
                 }
 
         }
+#if 0
         for(size_t i = 0;i < bin_size;i++)
             for(size_t j = 0;j < bin_size; j++){// for density
                 MyNLP* temp = new MyNLP( *(this->m_pDB) );
@@ -7419,7 +7428,8 @@ bool   MyNLP::ParallelSolve(double wWire, double target_density, int currentLeve
                 }
 
         }
-#if 0
+#endif
+#if 1
         for(size_t i = 0;i < param.WL_thread_size;i++){// for wirelength
             MyNLP* temp = new MyNLP( *(this->m_pDB) );
             {
@@ -7523,7 +7533,7 @@ bool   MyNLP::ParallelSolve(double wWire, double target_density, int currentLeve
 #endif
     //for test
     vector<double> grad_density,grad_wirelength,grad;
-    bool GD = true;
+    bool GD = param.gd;
     vector<int> modules;
     vector<int> whole_nets;
     double stepsize;
@@ -7560,13 +7570,28 @@ if(1){
 
     GetModulesByNets(whole_nets,modules);
 }
-
+#if 1
+if(isParallel){
+    for(size_t i = 0;i < param.Den_thread_size;i++){
+        sprintf( filename, "DenPartfig%d-%d-%d.plt", currentLevel, 0,i);
+        ac_Den[i]->args_mynlp->m_pDB->OutputGnuplotFigureWithSpecifiedModules(filename,ac_Den[i]->args_mynlp->modules);
+    }
+    for(size_t i = 0;i < param.WL_thread_size;i++){
+        sprintf( filename, "WLPartfig%d-%d-%d.plt", currentLevel, 0,i);
+        ac_WL[i]->args_mynlp->m_pDB->OutputGnuplotFigureWithSpecifiedModules(filename,ac_WL[i]->args_mynlp->modules);
+    }
+}
+#endif
 
     printf("\n======================================================================================\n");
     printf("cg begin\n");
+    //lock      = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_init(&lock,nullptr);
+    cond_lock = PTHREAD_COND_INITIALIZER;
+    Xmerge = new double[size_module_2];
     //save_x_threads.resize(tot_tasks);
     for(int ite = 0;ite < maxIte;ite++){
-        if( _weightWire <= 0.001) break;
+     //   if( _weightWire <= 0.001) break;
         int innerIte = 0;
         double old_obj = DBL_MAX;
         double last_obj_value = DBL_MAX;
@@ -7576,16 +7601,16 @@ if(1){
         while( true ){
             innerIte++;
 
-            if( innerIte % checkStep == 0 || isParallel){
+            if( innerIte % checkStep == 0){
                 printf(".");
                 fflush(stdout);
                 old_obj = last_obj_value;
                 eval_f(size_module_2,x,_expX,true,obj_value);
                 last_obj_value = obj_value;
             }
-            if( innerIte % checkStep == 0 || isParallel){
+            if( innerIte % checkStep == 0 ){
 
-                if( innerIte % (2*checkStep) == 0 || isParallel){
+                if( innerIte % (2*checkStep) == 0){
                     UpdateBlockPosition( x );
                     if( m_pDB->CalcHPWL() > bestLegalWL ){
                         printf("best legal WL\n");
@@ -7613,9 +7638,14 @@ if(1){
                 }
 
                 // 2005-03-11: meet the constraint
-                if( startDecreasing && over < target_density )
+                if( startDecreasing && over < target_density ){
+                    printf("over < target_density");
+                    fflush(stdout);
                     break;
+                }
                 if( obj_value >= param.precision * old_obj){
+                    printf("obj_value stop decreasing");
+                    fflush(stdout);
                     break;
                 }
             }
@@ -7669,117 +7699,114 @@ if(1){
                         getchar();
                     }
                     else{
-                        //DensityGrad(grad_density,whole_nets,bin);
-                        //WireLengthGrad(grad_wirelength,whole_nets);
+
 
                         DensityGradByModule(grad_density,modules,bin);
                         WireLengthGradByModule(grad_wirelength,modules);
 
-                     // eval_grad_f( size_module_2, x, _expX, true, grad_f );
+                        for(size_t i = 0;i < size_module_2;i++){
+                            grad[i] = grad_density[i] + grad_wirelength[i];
+                        }
+                        //DensityAdjustForce(size_module_2,grad,whole_nets);
+                        //AdjustForce(size_module_2,x,grad_f);
+                        LineSearch(size_module_2,x,grad,stepsize);// 0.000687    0.005845
+                        //stepsize = param.step;                       
+                        for(size_t i = 0;i < size_module_2/2;i++){
+                            x[2*i]   -= stepsize*grad[2*i];
+                            x[2*i+1] -= stepsize*grad[2*i+1];
+                        }
                     }
 
-                    for(size_t i = 0;i < size_module_2;i++){
-                          grad[i] = grad_density[i] + grad_wirelength[i];
-                        //  grad[i] = grad_f[i];
-                    }
-
-                    DensityAdjustForce(size_module_2,grad,whole_nets);
-                    AdjustForce(size_module_2,x,grad_f);
-                    for(size_t i = 0;i < size_module_2;i++){
-                       // assert(fabs(grad_f[i] - grad[i]) <= 0.001);
-                    }
-                    LineSearch(size_module_2,x,grad,stepsize);// 0.000687    0.005845
-                    //stepsize = param.step;
-                    for(size_t i = 0;i < size_module_2/2;i++){
-                        x[2*i]   -= stepsize*grad[2*i];
-                        x[2*i+1] -= stepsize*grad[2*i+1];
-                    }
 
                 }
 
             }
             else{// parallel
-                innerIte += (checkStep - 1);
+               // innerIte += (checkStep - 1);
                 job_done = 0;
                 done_flag = false;
-#if 0
-                ensityGradByModule(grad_density,modules,bin);
+#if 1
+                DensityGradByModule(grad_density,modules,bin);
                 WireLengthGradByModule(grad_wirelength,modules);
                 for(size_t i = 0;i < size_module_2;i++){
                       grad[i] = grad_density[i] + grad_wirelength[i];
                 }
                 //AdjustForce(size_module_2,x,grad_f);
                 LineSearch(size_module_2,x,grad,stepsize);
+                stepsize *= parallelScale;
 #endif
+                vector<double> grad_WL_parallel;
+                vector<double> grad_Density_parallel;
                 //stepsize = param.step;
-                stepsize = (currentLevel == 1) ? 0.000006507 :  0.005;
+                //stepsize = (currentLevel == 1) ? 0.000006507 :  0.005;
+                memcpy(xBak,x,sizeof(double)*size_module_2);
                 for(unsigned int i_thread = 0;i_thread < param.Den_thread_size;i_thread++){
                      // for density
                     memcpy(ac_Den[i_thread]->args_mynlp->x,x,sizeof(double)*size_module_2);
                     ac_Den[i_thread]->stepsize = stepsize;//0.000967    0.009235
                     ac_Den[i_thread]->args_mynlp->_weightWire = _weightWire;
-                    ac_Den[i_thread]->args_mynlp->_weightDensity = _weightDensity;                                      
+                    ac_Den[i_thread]->args_mynlp->_weightDensity = _weightDensity;
                     assert( threadpool_add(pool[i_thread],MyNLP::task_Density,(void*)(ac_Den[i_thread]),0) == 0 );
                 }
                 for(unsigned int i_thread = 0;i_thread < param.WL_thread_size;i_thread++){
                     // for wirelength
                     memcpy(ac_WL[i_thread]->args_mynlp->x,x,sizeof(double)*size_module_2);
-                    ac_Den[i_thread]->stepsize = stepsize;
+                    ac_WL[i_thread]->stepsize = stepsize;
                     ac_WL[i_thread]->args_mynlp->_weightWire = _weightWire;
                     ac_WL[i_thread]->args_mynlp->_weightDensity = _weightDensity;
-
                     assert( threadpool_add(pool[i_thread + param.Den_thread_size],MyNLP::task_WireLength,(void*)(ac_WL[i_thread]),0) == 0 );
                 }
+                if(param.debug){
+                    stepsize /= parallelScale;
+                    for(size_t i = 0;i < size_module_2/2;i++){
+                        x[2*i]   -= stepsize*grad[2*i];
+                        x[2*i+1] -= stepsize*grad[2*i+1];
+                    }
+                    BoundX(size_module_2,x,x_l,x_u);
+                }
 
-                while(1){
-                 //   printf("%4d jobs done, thread size is %4d\t",job_done,save_x_threads.size());
+                pthread_mutex_lock(&lock);
+                pthread_cond_wait(&cond_lock,&lock);
+                pthread_mutex_unlock(&lock);
+                /*while(1){
                     pthread_mutex_lock(&lock);
-                    if(job_done == tot_tasks || save_x_threads.size() == tot_tasks){
+                    if(job_done == tot_tasks){
                         pthread_mutex_unlock(&lock);
                         break;
                     }
                     pthread_mutex_unlock(&lock);
+                }*/
+            }
+
+
+            double xdiff = 0;
+            double *x_bak_bak;
+            if(param.debug){
+                x_bak_bak = new double[size_module_2];
+                for(size_t i = 0; i < size_module_2;i++){
+                    x_bak_bak[i] = x[i];
                 }
-           //     printf("\njob_done equals to %d\n",job_done);
-             //   fflush(stdout);
             }
             // merge
 #if 1
             if(isParallel){
-                int merge_step = 1;
-
-  //              for(size_t i = 0; i < size_module_2;i++){
-   //                 x_bak_bak[i] = x[i];
-   //             }
-
-                if(ite % merge_step == 0){//
-                    for(size_t j = 0;j < size_module_2/2;j++){
-                        double x_sum = 0;
-
-                        double y_sum = 0;
-                        for(size_t i = 0;i < tot_tasks;i++){
-                            x_sum += save_x_threads[i][ 2*j ];
-                            y_sum += save_x_threads[i][ 2*j+1 ];
-                        }
-                        x[2*j]   = x_sum/tot_tasks;
-                        x[2*j+1] = y_sum/tot_tasks;
+                for(size_t i = 0;i < size_module_2;i++){
+                    x[i] = Xmerge[i]/tot_tasks;
+                    if(param.debug){
+                        double delta = fabs(Xmerge[i] - (ac_Den[0]->args_mynlp->x[i] + ac_WL[0]->args_mynlp->x[i]));
+                        assert(delta <= 0.00000001);
+                        //printf("%4.3f\n",Xmerge[i] - (ac_Den[0]->args_mynlp->x[i] + ac_WL[0]->args_mynlp->x[i]));
+                        xdiff += fabs(x[i] - x_bak_bak[i]);
+                        //printf("%4.3f\n",fabs(x[i] - x_bak_bak[i]));
                     }
-                }
 
-               // write in
-                /*ofstream x_file;
-                x_file.open("x_record.txt",ostream::app);
-                x_file << "loop: " << ite << endl;
-                for(int i =0;i < size_module_2;i++){
-                    for(int j = 0;j < tot_tasks;j++){
-                        x_file << save_x_threads[j][i] <<"\t";
-                    }
-                    x_file << x[i] << "\t";
-                    x_file << x_bak_bak[i] << "\t";
-                    x_file << fabs(x[i] - x_bak_bak[i]) << endl;
+                    Xmerge[i] = 0;
                 }
-                x_file.close();
-                */
+            }
+            if(param.debug){
+                //printf("\ntot diff = %4.3f,mean diff = %4.3f\n",xdiff,xdiff/size_module_2);
+                param.xdiff.push_back(xdiff);
+                //getchar();
             }
 #endif
             if(0){
@@ -7819,17 +7846,51 @@ if(1){
             }
             else{  //
                 DensityBoundX(size_module_2);
-                DensityUpdatePotentialGridByModule(modules,bin);
-                WireLengthUpdateExpValueForCell(whole_nets,size_module_2);
+                UpdatePotentialGrid(x);
+                //DensityUpdatePotentialGridByModule(modules,bin);
+                //WireLengthUpdateExpValueForCell(whole_nets,size_module_2);
+                WireLengthUpdateExpValueForCellByModule(modules,size_module_2);
                 WireLengthUpdateExpValueForPin(whole_nets);
                 WireLengthUpdateNetsSumExp(whole_nets);
             }
+#if 0
+            if(innerIte == 4){
+                nets_cluster_Den.clear();
+                nets_cluster_Den.resize(bin_size);
+                for(size_t i = 0;i < bin_size;i++)
+                    nets_cluster_Den[i].resize(bin_size);
 
+                for(unsigned int i = 0;i < m_pDB->m_nets.size();i++){
+                    double c_x,c_y;
+                    get_center_position(x,c_x,c_y,i,0);//0: ortho_center,1: mean_center
+                    unsigned int n_x = (c_x - m_pDB->m_coreRgn.left)/(bucket_width );
+                    unsigned int n_y = (c_y - m_pDB->m_coreRgn.bottom)/(bucket_height);
+                    nets_cluster_Den[n_x][n_y].push_back(i);
+                }
+                for(size_t i = 0 ;i < bin_size;i++)
+                    for(size_t j = 0;j < bin_size;j++){// re-arrange nets
+                        size_t index = i*bin_size + j;
+                        ac_Den[index]->args_snc_Id.clear();
+                        ac_Den[index]->args_snc_Id.assign(nets_cluster_Den[i][j].begin(),nets_cluster_Den[i][j].end());
+                        GetModulesByNets(ac_Den[index]->args_snc_Id,ac_Den[index]->args_mynlp->modules);
 
+                        ac_WL[index]->args_snc_Id.clear();
+                        ac_WL[index]->args_snc_Id.assign(nets_cluster_Den[i][j].begin(),nets_cluster_Den[i][j].end());
+                        GetModulesByNets(ac_WL[index]->args_snc_Id,ac_WL[index]->args_mynlp->modules);
+                    }
+            }
+#endif
             save_x_threads.clear();
             printf("*");
             fflush(stdout);
         } // end while
+        if(param.debug){
+        printf("\n");
+            for(size_t i = 0;i < param.xdiff.size();i++)
+                printf("%4.3f\t",param.xdiff[i]);
+            param.xdiff.clear();
+            getchar();
+        }
 
         totalIte += innerIte;
 
@@ -7852,15 +7913,27 @@ if(1){
                 sprintf( filename, "PLfig%d-%d.plt", currentLevel, ite+1 );
                 m_pDB->OutputGnuplotFigure( filename, false, false );
             }
+            if(isParallel){
+                for(size_t i = 0;i < param.Den_thread_size;i++){
+                    sprintf( filename, "DenPartfig%d-%d-%d.plt", currentLevel, ite+1,i);
+                    ac_Den[i]->args_mynlp->m_pDB->OutputGnuplotFigureWithSpecifiedModules(filename,ac_Den[i]->args_mynlp->modules);
+                }
+                for(size_t i = 0;i < param.WL_thread_size;i++){
+                    sprintf( filename, "WLPartfig%d-%d-%d.plt", currentLevel, ite+1,i);
+                    ac_WL[i]->args_mynlp->m_pDB->OutputGnuplotFigureWithSpecifiedModules(filename,ac_WL[i]->args_mynlp->modules);
+                }
+            }
         }
 
         if(param.bShow){
-            printf( "\n%d-%2d HPWL= %.0f  maxDen= %.2f OD= %.4f ODLB=%.4f OP=%.4f  LTime= %.1fm  objValue=%.0f, WireW= %.0f \n",
+            eval_f(size_module_2,x,_expX,true,obj_value);
+            printf( "\n%d-%2d HPWL= %.0f  maxDen= %.2f OD= %.4f ODLB=%.4f OP=%.4f  LTime= %.1fm  objValue=%.0f, WireW= %.0f,totalWL = %.4f,DenW= %.4f,density = %.4f \n",
                     currentLevel, ite+1, m_pDB->CalcHPWL(),
                     maxDen, totalOverDen, totalOverDenLB, totalOverPotential,
                     double(seconds()-time_start)/60.0,
                     obj_value,
-                    _weightWire
+                    _weightWire,totalWL,
+                    _weightDensity,density
                     );
         }
 
@@ -7959,11 +8032,36 @@ if(1){
         }
 
 
-        //_weightWire /= m_incFactor;   //  _weightDensity *=2;
+       // _weightWire /= m_incFactor;   //  _weightDensity *=2;
         _weightDensity *=2;
         lastTotalOverPotential = totalOverPotential;
-        if(_weightWire <= 1.0)
-            break;
+#if 0
+        if(ite == 3){
+            nets_cluster_Den.clear();
+            nets_cluster_Den.resize(bin_size);
+            for(size_t i = 0;i < bin_size;i++)
+                nets_cluster_Den[i].resize(bin_size);
+
+            for(unsigned int i = 0;i < m_pDB->m_nets.size();i++){
+                double c_x,c_y;
+                get_center_position(x,c_x,c_y,i,0);//0: ortho_center,1: mean_center
+                unsigned int n_x = (c_x - m_pDB->m_coreRgn.left)/(bucket_width );
+                unsigned int n_y = (c_y - m_pDB->m_coreRgn.bottom)/(bucket_height);
+                nets_cluster_Den[n_x][n_y].push_back(i);
+            }
+            for(size_t i = 0 ;i < bin_size;i++)
+                for(size_t j = 0;j < bin_size;j++){// re-arrange nets
+                    size_t index = i*bin_size + j;
+                    ac_Den[index]->args_snc_Id.clear();
+                    ac_Den[index]->args_snc_Id.assign(nets_cluster_Den[i][j].begin(),nets_cluster_Den[i][j].end());
+                    GetModulesByNets(ac_Den[index]->args_snc_Id,ac_Den[index]->args_mynlp->modules);
+
+                    ac_WL[index]->args_snc_Id.clear();
+                    ac_WL[index]->args_snc_Id.assign(nets_cluster_Den[i][j].begin(),nets_cluster_Den[i][j].end());
+                    GetModulesByNets(ac_WL[index]->args_snc_Id,ac_WL[index]->args_mynlp->modules);
+                }
+        }
+#endif
     }// end of "for (ite = 0; ite < maxIte; ite++)"
 
     if (hasBestLegalSol)
@@ -8409,6 +8507,7 @@ void MyNLP::SGD_Density(MyNLP* cur_mynlp,size_t size_x,
         cur_mynlp->DensityBoundX(size_x);
         //cur_mynlp->DensityUpdatePotentialGrid(specified_nets_cluster,bin);
         cur_mynlp->DensityUpdatePotentialGridByModule(cur_mynlp->modules,bin);
+        //cur_mynlp->UpdatePotentialGrid(cur_mynlp->x);
  //       cur_mynlp->DensityUpdateExpValueForCell();
  //       cur_mynlp->DensityUpdateExpValueForPin();
   //      cur_mynlp->DensityUpdateNetsSumExp();
@@ -8418,9 +8517,10 @@ void MyNLP::SGD_Density(MyNLP* cur_mynlp,size_t size_x,
 void MyNLP::SGD_WireLength(MyNLP* cur_mynlp,size_t size_x,const vector<int>& specified_nets_cluster,
                         double stepsize,double maxloop){
     double SS = stepsize;
+    vector<double> grad;
+    grad.resize(size_x,0);
     for(size_t loop = 0; loop < maxloop; loop++){
-        vector<double> grad;
-        grad.resize(size_x,0);
+
 
    //     cur_mynlp->WireLengthGrad(grad,specified_nets_cluster);
         cur_mynlp->WireLengthGradByModule(grad,cur_mynlp->modules);
@@ -8432,7 +8532,8 @@ void MyNLP::SGD_WireLength(MyNLP* cur_mynlp,size_t size_x,const vector<int>& spe
 
         cur_mynlp->WireLengthBoundX(size_x);
 //        cur_mynlp->WireLengthUpdatePotentialGrid();
-        cur_mynlp->WireLengthUpdateExpValueForCell(specified_nets_cluster,size_x);
+//        cur_mynlp->WireLengthUpdateExpValueForCell(specified_nets_cluster,size_x);
+        cur_mynlp->WireLengthUpdateExpValueForCellByModule(cur_mynlp->modules,size_x);
         cur_mynlp->WireLengthUpdateExpValueForPin(specified_nets_cluster);
         cur_mynlp->WireLengthUpdateNetsSumExp(specified_nets_cluster);
     }
@@ -8701,13 +8802,19 @@ void MyNLP::task_Density(void *args){
     AC->args_mynlp->UpdatePotentialGrid(AC->args_mynlp->x);
     SGD_Density(AC->args_mynlp,AC->size_x,AC->args_snc_Id,AC->bin,AC->stepsize,AC->maxloop);// need x back
 
-    vector<double> temp;
-    for(size_t i = 0;i < 2*AC->args_mynlp->m_pDB->m_modules.size();i++)
-        temp.push_back(AC->args_mynlp->x[i]);
+    //vector<double> temp;
+    //for(size_t i = 0;i < 2*AC->args_mynlp->m_pDB->m_modules.size();i++)
+        //temp.push_back(AC->args_mynlp->x[i]);
     //save_x_threads.push_back(temp);
     pthread_mutex_lock(&lock);
-    save_x_threads.push_back(temp);
+    for(size_t i = 0;i < 2*AC->args_mynlp->m_pDB->m_modules.size();i++){
+        Xmerge[i] += AC->args_mynlp->x[i];
+        //printf("%4.3f\n",AC->args_mynlp->x[i]);
+    }
+    //save_x_threads.push_back(temp);
     job_done++;
+    if(job_done == param.Den_thread_size + param.WL_thread_size)
+        pthread_cond_signal(&cond_lock);
     if(param.debug){
         printf("weightwire = %.4f,density = %.4f %4d job(s) done,thread %4d done!\n",\
                AC->args_mynlp->_weightWire,\
@@ -8737,13 +8844,20 @@ void MyNLP::task_WireLength(void *args){
 
     SGD_WireLength(AC->args_mynlp,AC->size_x,AC->args_snc_Id,AC->stepsize,AC->maxloop);// need x back
 
-    vector<double> temp;
-    for(size_t i = 0;i < 2*AC->args_mynlp->m_pDB->m_modules.size();i++)
-        temp.push_back(AC->args_mynlp->x[i]);
+    //vector<double> temp;
+   // for(size_t i = 0;i < 2*AC->args_mynlp->m_pDB->m_modules.size();i++)
+       // temp.push_back(AC->args_mynlp->x[i]);
     //save_x_threads.push_back(temp);
     pthread_mutex_lock(&lock);
-    save_x_threads.push_back(temp);
+
+    for(size_t i = 0;i < 2*AC->args_mynlp->m_pDB->m_modules.size();i++){
+        Xmerge[i] += AC->args_mynlp->x[i];
+        //printf("%4.3f\n",AC->args_mynlp->x[i]);
+    }
+    //save_x_threads.push_back(temp);
     job_done++;
+    if(job_done == param.Den_thread_size + param.WL_thread_size)
+        pthread_cond_signal(&cond_lock);
     if(param.debug){
         printf("weightwire = %.4f,density = %.4f %4d job(s) done,thread %4d done!\n",\
                AC->args_mynlp->_weightWire,\
@@ -10231,7 +10345,14 @@ void MyNLP::WireLengthUpdateExpValueForCell(const vector<int> netsID, size_t siz
         }
     }
 }
-
+void MyNLP::WireLengthUpdateExpValueForCellByModule(const vector<int> modules,size_t size_x){
+    size_t moduleSize = modules.size();
+    for(size_t i = 0;i < moduleSize;i++){
+        size_t moduleId = modules[i];
+        _expX[2*moduleId]   = pow( x[2*moduleId] * m_posScale, _alpha );
+        _expX[2*moduleId+1] = pow( x[2*moduleId+1] * m_posScale, _alpha );
+    }
+}
 void MyNLP::WireLengthUpdateExpValueForPin(const vector<int> netsID){
     for(size_t pinId = 0;pinId < m_pDB->m_pins.size();pinId++){
         size_t moduleId = m_pDB->m_pins[pinId].moduleId;
@@ -10303,8 +10424,10 @@ void MyNLP::GetDensityGrad(const size_t moduleId,const vector<int> bin,double &g
 
        int gx, gy;
        GetClosestGrid( left, bottom, gx, gy );
+
        assert(gx >= 0);
        assert(gy <= m_potentialGridSize);
+
 
        bin_left = gx;
        bin_bottom = gy;
@@ -10532,7 +10655,13 @@ void MyNLP::DensityUpdatePotentialGridByModule(const vector<int>& modules,const 
         size_t moduleId = modules[i];
         UpdateModulePotentialGridByDiff(moduleId,bin);
     }
-
+/*
+    for(size_t i = 0;i < m_potentialGridSize;i++)
+        for(size_t j = 0;j < m_potentialGridSize;j++){
+            if( m_gridPotential[i][j] < 0 )
+                m_gridPotential[i][j] = 0;
+        }
+*/
 }
 void MyNLP::UpdateModulePotentialGridByDiff(size_t moduleId,vector<int> bin){
     if( m_pDB->m_modules[moduleId].m_isOutCore )
@@ -10611,7 +10740,8 @@ void MyNLP::UpdateModulePotentialGridByDiff(size_t moduleId,vector<int> bin){
                     GetPotential( newcellY, yy, _potentialRY, height );
             double old_potential = GetPotential( oldcellX, xx, _potentialRX, width ) *
                     GetPotential( oldcellY, yy, _potentialRY, height );
-
+            if(new_potential < 0) new_potential = 0;
+            if(old_potential < 0) old_potential = 0;
             double delta = new_potential -  old_potential;
             potentialList.push_back( potentialStruct( gxx, gyy, delta) );
             totalPotential += new_potential;
